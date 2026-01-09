@@ -1,6 +1,4 @@
 #!/bin/bash
-# Install codex-status tools
-
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,65 +6,134 @@ INSTALL_DIR="${HOME}/.local/bin"
 PRIORITY_DIR="${HOME}/.local/bin/priority"
 LIB_DIR="${HOME}/.local/lib/codex-status"
 SHARE_DIR="${HOME}/.local/share/codex-status"
+CACHE_DIR="${HOME}/.cache/codex-status"
+
+CONFIG_MARKER="# codex-status config"
+CONFIG_BLOCK=$(cat <<'CONFIGEOF'
+# codex-status config
+export PATH="$HOME/.local/bin/priority:$PATH"
+export CODEX_STATUS_WEZTERM_MODE="off"
+CONFIGEOF
+)
+
+detect_shell() {
+    if [ -n "$ZSH_VERSION" ] || [ "$SHELL" = "$(which zsh 2>/dev/null)" ]; then
+        echo "zsh"
+    elif [ -n "$BASH_VERSION" ] || [ "$SHELL" = "$(which bash 2>/dev/null)" ]; then
+        echo "bash"
+    else
+        basename "$SHELL" 2>/dev/null || echo "unknown"
+    fi
+}
+
+get_rc_file() {
+    local shell_type="$1"
+    case "$shell_type" in
+        zsh)  echo "${HOME}/.zshrc" ;;
+        bash)
+            if [[ "$OSTYPE" == "darwin"* ]]; then
+                echo "${HOME}/.bash_profile"
+            else
+                echo "${HOME}/.bashrc"
+            fi
+            ;;
+        *)    echo "" ;;
+    esac
+}
+
+get_hook_file() {
+    local shell_type="$1"
+    case "$shell_type" in
+        zsh)  echo "${LIB_DIR}/shell_hook.zsh" ;;
+        bash) echo "${LIB_DIR}/shell_hook.bash" ;;
+        *)    echo "" ;;
+    esac
+}
+
+add_config_to_rc() {
+    local rc_file="$1"
+    local hook_file="$2"
+
+    if [ -z "$rc_file" ]; then
+        return 1
+    fi
+
+    [ -f "$rc_file" ] || touch "$rc_file"
+
+    if grep -q "$CONFIG_MARKER" "$rc_file" 2>/dev/null; then
+        echo "Config already exists in $rc_file, skipping..."
+        return 0
+    fi
+
+    echo "" >> "$rc_file"
+    echo "$CONFIG_BLOCK" >> "$rc_file"
+    if [ -n "$hook_file" ]; then
+        echo "source \"$hook_file\"" >> "$rc_file"
+    fi
+    echo "# end codex-status config" >> "$rc_file"
+
+    echo "Added config to $rc_file"
+    return 0
+}
 
 echo "Installing codex-status..."
+echo ""
 
-# Create directories
-mkdir -p "$INSTALL_DIR"
-mkdir -p "$PRIORITY_DIR"
-mkdir -p "$LIB_DIR"
-mkdir -p "$SHARE_DIR"
-mkdir -p ~/.cache/codex-status
+mkdir -p "$INSTALL_DIR" "$PRIORITY_DIR" "$LIB_DIR" "$SHARE_DIR" "$CACHE_DIR"
 
-# Copy library
 cp -r "$SCRIPT_DIR/lib/"* "$LIB_DIR/"
+cp "$SCRIPT_DIR/config/ccbdone_instructions.txt" "$SHARE_DIR/"
+cp "$SCRIPT_DIR/config/done_tag_instructions.txt" "$SHARE_DIR/"
 
-# Copy shared instruction templates
-cp "$SCRIPT_DIR/config/ccbdone_instructions.txt" "$SHARE_DIR/ccbdone_instructions.txt"
-cp "$SCRIPT_DIR/config/done_tag_instructions.txt" "$SHARE_DIR/done_tag_instructions.txt"
-
-# Install CLI tools (they auto-resolve installed lib via ~/.local/lib/codex-status)
-cp "$SCRIPT_DIR/bin/codex-status" "$INSTALL_DIR/codex-status"
-cp "$SCRIPT_DIR/bin/codex-status-wrapper" "$INSTALL_DIR/codex-status-wrapper"
-cp "$SCRIPT_DIR/bin/codex-status-bg" "$INSTALL_DIR/codex-status-bg"
+cp "$SCRIPT_DIR/bin/codex-status" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/bin/codex-status-wrapper" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/bin/codex-status-bg" "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/codex-status" "$INSTALL_DIR/codex-status-wrapper" "$INSTALL_DIR/codex-status-bg"
 
-# Install Codex wrapper that enforces completion tags
-cp "$SCRIPT_DIR/bin/codex-ccbdone" "$INSTALL_DIR/codex-ccbdone"
-chmod +x "$INSTALL_DIR/codex-ccbdone"
-cp "$SCRIPT_DIR/bin/codex-done" "$INSTALL_DIR/codex-done"
-chmod +x "$INSTALL_DIR/codex-done"
+cp "$SCRIPT_DIR/bin/codex-ccbdone" "$INSTALL_DIR/"
+cp "$SCRIPT_DIR/bin/codex-done" "$INSTALL_DIR/"
+chmod +x "$INSTALL_DIR/codex-ccbdone" "$INSTALL_DIR/codex-done"
 
-# Install codex wrapper (auto-inject done-tag) to priority path
 cp "$SCRIPT_DIR/bin/codex-wrapper" "$PRIORITY_DIR/codex"
 chmod +x "$PRIORITY_DIR/codex"
 
-echo "✅ Installed to $INSTALL_DIR"
+echo "Files installed to $INSTALL_DIR"
 echo ""
-echo "Usage:"
-echo "  codex-status              # Check current status"
-echo "  codex-status --watch      # Continuous monitoring"
-echo "  codex-status-wrapper ...  # Launch codex with title updates"
-echo "  codex-status-bg pts/XX    # Update title for one TTY"
-echo "  codex-ccbdone             # Start codex with CCB_DONE rule"
-echo "  codex-done                # Start codex with CODEX_DONE rule (recommended)"
+
+SHELL_TYPE=$(detect_shell)
+RC_FILE=$(get_rc_file "$SHELL_TYPE")
+HOOK_FILE=$(get_hook_file "$SHELL_TYPE")
+
+echo "Detected shell: $SHELL_TYPE"
+echo "RC file: $RC_FILE"
 echo ""
-echo "Example:"
-echo "  codex-status-wrapper -c disable_paste_burst=true"
+
+if [ -n "$RC_FILE" ]; then
+    read -p "Auto-configure shell? (add to $RC_FILE) [Y/n] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        if add_config_to_rc "$RC_FILE" "$HOOK_FILE"; then
+            echo ""
+            echo "Configuration added. Run: source $RC_FILE"
+        fi
+    else
+        echo "Skipped auto-configuration."
+        echo ""
+        echo "Manual setup - add to $RC_FILE:"
+        echo "  export PATH=\"\$HOME/.local/bin/priority:\$PATH\""
+        echo "  source $HOOK_FILE"
+        echo "  export CODEX_STATUS_WEZTERM_MODE=\"off\""
+    fi
+else
+    echo "Unknown shell. Manual setup required."
+fi
+
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🚀 Add to your ~/.zshrc (or ~/.bashrc):"
+echo "Installation complete!"
 echo ""
-echo "  # Codex-status: priority PATH + shell hook + env"
-echo "  export PATH=\"\$HOME/.local/bin/priority:\$PATH\""
-echo "  # Zsh:"
-echo "  source $LIB_DIR/shell_hook.zsh"
-echo "  # Bash:"
-echo "  # source $LIB_DIR/shell_hook.bash"
-echo "  export CODEX_STATUS_WEZTERM_MODE=\"off\""
+echo "Commands available:"
+echo "  codex           # Auto status monitor + done-tag injection"
+echo "  codex-status    # Check current status"
+echo "  codex-done      # Start codex with CODEX_DONE rule"
 echo ""
-echo "Then run: source ~/.zshrc   # (or source ~/.bashrc)"
-echo ""
-echo "After setup:"
-echo "  codex        # Auto-inject done-tag + auto status monitor"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "To uninstall: $SCRIPT_DIR/uninstall.sh"
