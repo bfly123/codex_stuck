@@ -1,0 +1,16 @@
+# CCB Done Tag Instructions (for Codex)
+#
+# Goal: distinguish "waiting for input" vs "waiting for output" reliably by
+# forcing a stable completion marker in every assistant reply.
+#
+# Rules:
+# - If the user's message contains a line like:
+#     CCB_REQ_ID: <32 hex>
+#   then the final line of your reply MUST be:
+#     CCB_DONE: <same 32 hex>
+# - Otherwise, the final line of your reply MUST be exactly:
+#     CCB_DONE
+#
+# IMPORTANT:
+# - The completion line must be the very last line.
+# - Do not add any extra punctuation or whitespace on that line.

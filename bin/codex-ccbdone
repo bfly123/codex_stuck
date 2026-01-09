@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Start Codex with a completion marker rule loaded from codex-status install.
+#
+# This is intended to make Codex append a stable completion tag at the end of
+# each reply so external tools can distinguish:
+# - waiting for input (completed)
+# - waiting for output (pending)
+#
+# Usage:
+#   codex-ccbdone [codex options...]
+#
+# Notes:
+# - This wrapper intentionally does NOT accept an initial PROMPT argument; any
+#   non-option args will be rejected to avoid accidentally overriding the rule.
+
+set -euo pipefail
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/codex-status"
+rule_file="$data_dir/ccbdone_instructions.txt"
+
+if [[ ! -r "$rule_file" ]]; then
+  echo "❌ Missing $rule_file. Re-run this project's install.sh." >&2
+  exit 1
+fi
+
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      ;;
+    *)
+      echo "❌ codex-ccbdone only accepts codex OPTIONS; start Codex then type your prompt in the UI." >&2
+      exit 2
+      ;;
+  esac
+done
+
+exec codex "$@" "$(cat "$rule_file")"
+

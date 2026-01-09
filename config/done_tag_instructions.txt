@@ -1,0 +1,20 @@
+# Done Tag Instructions (codex-status)
+#
+# Purpose:
+# - Make every turn end with a stable completion tag so external tools can tell:
+#   - waiting for output (no DONE yet)
+#   - waiting for input (DONE observed)
+#
+# Rule (always):
+# - The final line of EVERY assistant reply MUST be exactly:
+#     CODEX_DONE
+#
+# Optional (for request tracking):
+# - If the user's message contains a line like:
+#     CODEX_REQ_ID: <32 hex>
+#   then the final line MUST be:
+#     CODEX_DONE: <same 32 hex>
+#
+# IMPORTANT:
+# - The completion line must be the very last line.
+# - Do not add any extra punctuation or whitespace on that line.

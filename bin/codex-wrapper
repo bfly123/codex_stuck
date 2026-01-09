@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# codex-wrapper: Transparently wraps codex with done-tag injection
+# Place this BEFORE the real codex in PATH
+
+set -euo pipefail
+
+# Find the real codex (skip this wrapper)
+REAL_CODEX=""
+for p in $(type -ap codex 2>/dev/null); do
+    if [[ "$p" != "$0" ]] && ! [[ "$p" -ef "$0" ]]; then
+        REAL_CODEX="$p"
+        break
+    fi
+done
+
+if [[ -z "$REAL_CODEX" ]]; then
+    # Fallback: use npm global path
+    REAL_CODEX="$HOME/.nvm/versions/node/$(ls -1 "$HOME/.nvm/versions/node" 2>/dev/null | tail -1)/bin/codex"
+fi
+
+[[ -x "$REAL_CODEX" ]] || { echo "❌ Cannot find real codex"; exit 1; }
+
+# Load done-tag instructions
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/codex-status"
+rule_file="$data_dir/done_tag_instructions.txt"
+
+# Subcommands that should NOT get injection
+subcommands=(exec review login logout mcp mcp-server app-server completion sandbox apply resume cloud features help)
+
+is_subcommand() {
+    local candidate="$1"
+    for cmd in "${subcommands[@]}"; do
+        [[ "$candidate" == "$cmd" ]] && return 0
+    done
+    return 1
+}
+
+# Parse args
+opts=()
+positionals=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --) shift; positionals+=("$@"); break ;;
+        -*) opts+=("$1"); shift ;;
+        *) positionals+=("$1"); shift ;;
+    esac
+done
+
+# If subcommand or no injection file, pass through
+if [[ ${#positionals[@]} -ge 1 ]] && is_subcommand "${positionals[0]}"; then
+    exec "$REAL_CODEX" "${opts[@]}" "${positionals[@]}"
+fi
+
+if [[ ! -r "$rule_file" ]]; then
+    exec "$REAL_CODEX" "${opts[@]}" "${positionals[@]}"
+fi
+
+# Inject done-tag
+rule_text="$(cat "$rule_file")"
+
+if [[ ${#positionals[@]} -eq 0 ]]; then
+    exec "$REAL_CODEX" "${opts[@]}" "$rule_text"
+elif [[ ${#positionals[@]} -eq 1 ]]; then
+    combined="${rule_text}
+
+${positionals[0]}"
+    exec "$REAL_CODEX" "${opts[@]}" "$combined"
+else
+    exec "$REAL_CODEX" "${opts[@]}" "${positionals[@]}"
+fi

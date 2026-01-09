@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""
+codex-status - View Codex CLI running status
+
+Usage:
+    codex-status              # One-time status check
+    codex-status --watch      # Continuous monitoring
+    codex-status --json       # JSON output
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+def _add_lib_to_syspath() -> None:
+    env = os.environ.get("CODEX_STATUS_LIB", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    # Repo layout: <repo>/bin, <repo>/lib
+    candidates.append(Path(__file__).resolve().parent.parent / "lib")
+    # Install layout: ~/.local/lib/codex-status
+    candidates.append(Path.home() / ".local" / "lib" / "codex-status")
+    for p in candidates:
+        try:
+            if (p / "monitor.py").exists():
+                sys.path.insert(0, str(p))
+                return
+        except Exception:
+            continue
+
+
+_add_lib_to_syspath()
+from monitor import CodexMonitor, State
+from renderer import render_oneline, render_detail, update_title_with_status
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="View Codex CLI running status",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "-w", "--watch",
+        action="store_true",
+        help="Continuous monitoring mode"
+    )
+    parser.add_argument(
+        "-t", "--title",
+        action="store_true",
+        help="Update terminal title (useful with --watch)"
+    )
+    parser.add_argument(
+        "--tty",
+        help="Write title updates to a specific TTY (e.g. /dev/pts/3)",
+    )
+    parser.add_argument(
+        "-d", "--detail",
+        action="store_true",
+        help="Show detailed output"
+    )
+    parser.add_argument(
+        "-j", "--json",
+        action="store_true",
+        help="Output as JSON"
+    )
+    parser.add_argument(
+        "-i", "--interval",
+        type=float,
+        default=2.0,
+        help="Watch interval in seconds (default: 2)"
+    )
+    parser.add_argument(
+        "-p", "--pid",
+        type=int,
+        help="Specify Codex PID (auto-detect if not given)"
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output"
+    )
+
+    args = parser.parse_args()
+
+    monitor = CodexMonitor(pid=args.pid)
+    tty_out = None
+    if args.tty:
+        try:
+            tty_out = open(args.tty, "w", buffering=1)
+        except Exception as e:
+            print(f"Error: cannot open --tty {args.tty}: {e}", file=sys.stderr)
+            sys.exit(2)
+
+    if args.watch:
+        watch_loop(monitor, args, tty_out=tty_out)
+    else:
+        single_check(monitor, args, tty_out=tty_out)
+
+
+def single_check(monitor: CodexMonitor, args, tty_out=None):
+    """Single status check."""
+    status = monitor.sample()
+
+    if args.json:
+        print(json.dumps(status.to_dict(), indent=2))
+    elif args.detail:
+        print(render_detail(status))
+    else:
+        print(render_oneline(status, color=not args.no_color))
+
+    if args.title:
+        update_title_with_status(status, out=tty_out)
+
+    # Exit code based on state
+    if status.state == State.STUCK:
+        sys.exit(2)
+    elif status.state == State.EXITED:
+        sys.exit(1)
+    sys.exit(0)
+
+
+def watch_loop(monitor: CodexMonitor, args, tty_out=None):
+    """Continuous monitoring loop."""
+    try:
+        last_line = ""
+        while True:
+            status = monitor.sample()
+
+            if args.json:
+                print(json.dumps(status.to_dict()))
+            else:
+                line = render_oneline(status, color=not args.no_color)
+                # Clear and reprint on same line
+                if not args.detail:
+                    sys.stdout.write(f"\r\033[K{line}")
+                    sys.stdout.flush()
+                else:
+                    # Clear screen and print detail
+                    sys.stdout.write("\033[2J\033[H")
+                    print(render_detail(status))
+
+            if args.title:
+                update_title_with_status(status, out=tty_out)
+
+            if status.state == State.EXITED:
+                print()  # newline before exit
+                break
+
+            time.sleep(args.interval)
+
+    except KeyboardInterrupt:
+        print()  # newline
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""
+codex-status-wrapper - Launch Codex with live status in terminal title
+
+Usage:
+    codex-status-wrapper [codex args...]
+
+The terminal title will show:
+    🟢 Run 5m [3/5] Fix parser
+    🟡 Think 2m
+    🟠 Idle 1m
+    🔴 Stuck 5m
+"""
+
+import os
+import sys
+import time
+import signal
+import threading
+from pathlib import Path
+from typing import Optional
+import subprocess
+import shutil
+
+def _add_lib_to_syspath() -> None:
+    env = os.environ.get("CODEX_STATUS_LIB", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    candidates.append(Path(__file__).resolve().parent.parent / "lib")
+    candidates.append(Path.home() / ".local" / "lib" / "codex-status")
+    for p in candidates:
+        try:
+            if (p / "monitor.py").exists():
+                sys.path.insert(0, str(p))
+                return
+        except Exception:
+            continue
+
+
+_add_lib_to_syspath()
+from monitor import CodexMonitor, State
+from renderer import render_title, set_terminal_title
+
+
+class StatusUpdater:
+    """Background thread that updates terminal title."""
+
+    def __init__(
+        self,
+        monitor: CodexMonitor,
+        interval: float = 2.0,
+        tty_out=None,
+        wezterm_pane_id: Optional[str] = None,
+    ):
+        self.interval = interval
+        self.monitor = monitor
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._tty_out = tty_out
+        self._wezterm_pane_id = wezterm_pane_id
+        self._wezterm_mode = os.environ.get("CODEX_STATUS_WEZTERM_MODE", "auto").strip().lower()
+        if self._wezterm_mode == "auto":
+            self._wezterm_mode = "window-active" if shutil.which("wezterm") else "off"
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=1.0)
+
+    def _run(self):
+        while not self._stop.is_set():
+            try:
+                status = self.monitor.sample()
+                title = render_title(status)
+                if not self._set_title(title) and self._tty_out is not None:
+                    set_terminal_title(title, out=self._tty_out)
+
+                if status.state == State.EXITED:
+                    break
+
+            except Exception:
+                pass
+
+            self._stop.wait(self.interval)
+
+        # Final title
+        try:
+            if not self._set_title("⚫ Codex Exit") and self._tty_out is not None:
+                set_terminal_title("⚫ Codex Exit", out=self._tty_out)
+        except Exception:
+            pass
+
+    def _set_title(self, title: str) -> bool:
+        if self._wezterm_mode == "off" or not self._wezterm_pane_id or not shutil.which("wezterm"):
+            return False
+        if self._wezterm_mode == "tab":
+            args = ["wezterm", "cli", "set-tab-title", "--pane-id", str(self._wezterm_pane_id), title]
+        else:
+            args = ["wezterm", "cli", "set-window-title", "--pane-id", str(self._wezterm_pane_id), title]
+        try:
+            r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+
+SUBCOMMANDS = {
+    "exec",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "mcp-server",
+    "app-server",
+    "completion",
+    "sandbox",
+    "apply",
+    "resume",
+    "cloud",
+    "features",
+    "help",
+}
+
+ONE_VALUE_OPTS = {
+    "-c",
+    "--config",
+    "--enable",
+    "--disable",
+    "-i",  # handled separately, but keep here for -i <FILE>
+    "--image",
+    "-m",
+    "--model",
+    "--local-provider",
+    "-p",
+    "--profile",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-C",
+    "--cd",
+    "--add-dir",
+}
+
+
+def _find_done_tag_file() -> Optional[Path]:
+    override = os.environ.get("CODEX_STATUS_DONE_TAG_FILE", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.exists():
+            return p
+
+    data_dir = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    p = data_dir / "codex-status" / "done_tag_instructions.txt"
+    if p.exists():
+        return p
+
+    repo = Path(__file__).resolve().parent.parent / "config" / "done_tag_instructions.txt"
+    if repo.exists():
+        return repo
+
+    return None
+
+
+def _maybe_inject_done_tag(args: list[str]) -> list[str]:
+    # If subcommand, don't inject.
+    first_nonopt = None
+    for a in args:
+        if a == "--":
+            break
+        if a.startswith("-"):
+            continue
+        first_nonopt = a
+        break
+    if first_nonopt and first_nonopt in SUBCOMMANDS:
+        return args
+
+    rule_file = _find_done_tag_file()
+    if not rule_file:
+        return args
+
+    try:
+        rule_text = rule_file.read_text(encoding="utf-8")
+    except Exception:
+        return args
+
+    positionals: list[int] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            # Unclear; do not modify.
+            return args
+
+        # --opt=value form
+        if a.startswith("--") and "=" in a:
+            i += 1
+            continue
+
+        if a in ("-i", "--image"):
+            # Consume existing file paths after -i/--image, but avoid eating the prompt.
+            j = i + 1
+            while j < len(args) and not args[j].startswith("-"):
+                if Path(args[j]).expanduser().exists():
+                    j += 1
+                else:
+                    break
+            i = j
+            continue
+
+        if a in ONE_VALUE_OPTS:
+            i += 2
+            continue
+
+        if a.startswith("-"):
+            i += 1
+            continue
+
+        positionals.append(i)
+        i += 1
+
+    if len(positionals) == 0:
+        return args + [rule_text]
+    if len(positionals) == 1:
+        idx = positionals[0]
+        combined = f"{rule_text}\n\n{args[idx]}"
+        return args[:idx] + [combined] + args[idx + 1 :]
+    return args
+
+
+def _resolve_real_codex_windows(default: str = "codex") -> str:
+    override = os.environ.get("CODEX_STATUS_REAL_CODEX", "").strip()
+    if override:
+        return override
+
+    try:
+        out = subprocess.run(["where", "codex"], capture_output=True, text=True).stdout.splitlines()
+    except Exception:
+        return default
+
+    shim = str(Path.home() / ".local" / "bin" / "priority" / "codex.cmd")
+    shim_lower = shim.lower()
+
+    for line in out:
+        p = line.strip().strip('"')
+        if not p:
+            continue
+        if p.lower() == shim_lower:
+            continue
+        return p
+
+    return default
+
+
+def main():
+    args = _maybe_inject_done_tag(sys.argv[1:])
+    wezterm_pane_id = os.environ.get("WEZTERM_PANE", "").strip() or None
+    interval = float(os.environ.get("CODEX_STATUS_INTERVAL_S", "2"))
+
+    tty_out = None
+    if os.name != "nt":
+        try:
+            tty_out = open("/dev/tty", "w", buffering=1)
+        except Exception:
+            tty_out = None
+
+    if os.name == "nt":
+        real_codex = _resolve_real_codex_windows()
+    else:
+        real_codex = os.environ.get("CODEX_STATUS_REAL_CODEX", "").strip() or "codex"
+    try:
+        # Launch codex as a child process so the updater can keep running.
+        proc = subprocess.Popen([real_codex] + args)
+    except FileNotFoundError:
+        print(f"Error: {real_codex} not found in PATH", file=sys.stderr)
+        return 127
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    monitor = CodexMonitor(pid=proc.pid, start_cwd=os.getcwd())
+    updater = StatusUpdater(
+        monitor=monitor,
+        interval=interval,
+        tty_out=tty_out,
+        wezterm_pane_id=wezterm_pane_id,
+    )
+    updater.start()
+
+    def _stop_and_exit(code: int) -> None:
+        try:
+            updater.stop()
+        finally:
+            try:
+                if tty_out:
+                    tty_out.close()
+            except Exception:
+                pass
+        raise SystemExit(code)
+
+    def signal_handler(signum, frame):
+        try:
+            proc.send_signal(signum)
+        except Exception:
+            pass
+        _stop_and_exit(128 + signum)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        returncode = proc.wait()
+    except KeyboardInterrupt:
+        try:
+            proc.send_signal(signal.SIGINT)
+        except Exception:
+            pass
+        returncode = proc.wait()
+
+    updater.stop()
+    try:
+        if tty_out:
+            tty_out.close()
+    except Exception:
+        pass
+    return int(returncode) if returncode is not None else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# codex-done - launch interactive Codex with an auto-injected completion tag rule
+#
+# This is the recommended (project-independent) way to ensure every assistant
+# reply ends with a stable marker, so codex-status can distinguish:
+# - Free: waiting for input
+# - Run: waiting for output / working
+# - Stuck: pending output but no session activity for N seconds
+
+set -euo pipefail
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/codex-status"
+rule_file="$data_dir/done_tag_instructions.txt"
+
+if [[ ! -r "$rule_file" ]]; then
+  echo "❌ Missing $rule_file. Re-run this project's install.sh." >&2
+  exit 1
+fi
+
+subcommands=(
+  exec review login logout mcp mcp-server app-server completion sandbox apply resume cloud features help
+)
+
+is_subcommand() {
+  local candidate="$1"
+  for cmd in "${subcommands[@]}"; do
+    [[ "$candidate" == "$cmd" ]] && return 0
+  done
+  return 1
+}
+
+opts=()
+positionals=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        positionals+=("$1")
+        shift
+      done
+      break
+      ;;
+    -*)
+      opts+=("$1")
+      shift
+      ;;
+    *)
+      positionals+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#positionals[@]} -ge 1 ]] && is_subcommand "${positionals[0]}"; then
+  exec codex "${opts[@]}" "${positionals[@]}"
+fi
+
+rule_text="$(cat "$rule_file")"
+
+if [[ ${#positionals[@]} -eq 0 ]]; then
+  exec codex "${opts[@]}" "$rule_text"
+elif [[ ${#positionals[@]} -eq 1 ]]; then
+  combined="${rule_text}\n\n${positionals[0]}"
+  exec codex "${opts[@]}" "$(printf "%b" "$combined")"
+else
+  # Too many positionals for interactive mode; passthrough without injection.
+  exec codex "${opts[@]}" "${positionals[@]}"
+fi

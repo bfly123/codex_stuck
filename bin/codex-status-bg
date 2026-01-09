@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""
+codex-status-bg - per-terminal background title updater.
+
+Usage:
+  codex-status-bg pts/XX [start_cwd]
+  codex-status-bg /dev/ttys001 [start_cwd]
+
+Notes:
+- Spawns a detached worker by default, so this command returns immediately.
+- The worker finds Codex running on that TTY, then updates its title until exit.
+"""
+
+import argparse
+import atexit
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict
+
+import shutil
+
+
+def _add_lib_to_syspath() -> None:
+    env = os.environ.get("CODEX_STATUS_LIB", "").strip()
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    candidates.append(Path(__file__).resolve().parent.parent / "lib")
+    candidates.append(Path.home() / ".local" / "lib" / "codex-status")
+    for p in candidates:
+        try:
+            if (p / "monitor.py").exists():
+                sys.path.insert(0, str(p))
+                return
+        except Exception:
+            continue
+
+
+_add_lib_to_syspath()
+from monitor import CodexMonitor, State  # noqa: E402
+from renderer import render_title, set_terminal_title  # noqa: E402
+
+
+def _parse_elapsed(s: str) -> Optional[int]:
+    s = (s or "").strip()
+    if not s:
+        return None
+    # `etime` format: [[dd-]hh:]mm:ss
+    days = 0
+    if "-" in s:
+        d, rest = s.split("-", 1)
+        try:
+            days = int(d)
+        except Exception:
+            days = 0
+        s = rest
+    parts = s.split(":")
+    try:
+        nums = [int(p) for p in parts]
+    except Exception:
+        return None
+    if len(nums) == 3:
+        h, m, sec = nums
+    elif len(nums) == 2:
+        h, m, sec = 0, nums[0], nums[1]
+    else:
+        return None
+    return days * 86400 + h * 3600 + m * 60 + sec
+
+
+def _tty_path(arg: str) -> str:
+    if arg.startswith("/dev/"):
+        return arg
+    return f"/dev/{arg}"
+
+
+def _cache_dir() -> Path:
+    base = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+    return base / "codex-status"
+
+
+def _pidfile_for_tty(tty_path: str) -> Path:
+    name = tty_path.replace("/dev/", "").replace("/", "_")
+    return _cache_dir() / f"bg-{name}.pid"
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _get_cmdline(pid: int) -> str:
+    if Path("/proc").is_dir():
+        try:
+            return Path(f"/proc/{pid}/cmdline").read_text(errors="replace").replace("\x00", " ").strip()
+        except Exception:
+            pass
+    try:
+        return subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _kill_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except Exception:
+        return
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        if not _is_alive(pid):
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _find_codex_pid_on_tty(tty_name: str) -> Optional[int]:
+    candidates: List[Tuple[int, int, str]] = []
+    ps_variants = [
+        (True, ["ps", "-t", tty_name, "-o", "pid=,etimes=,args="]),
+        (False, ["ps", "-t", tty_name, "-o", "pid=,etime=,command="]),
+    ]
+
+    for is_etimes, cmd in ps_variants:
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True)
+            if p.returncode != 0 or not p.stdout.strip():
+                continue
+            for line in p.stdout.splitlines():
+                parts = line.strip().split(None, 2)
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except Exception:
+                    continue
+                if is_etimes:
+                    elapsed = int(parts[1]) if parts[1].isdigit() else None
+                else:
+                    elapsed = _parse_elapsed(parts[1])
+                cmdline = parts[2] if len(parts) >= 3 else ""
+                if elapsed is None:
+                    continue
+                candidates.append((pid, elapsed, cmdline))
+            if candidates:
+                break
+        except Exception:
+            continue
+
+    if not candidates:
+        return None
+
+    def score(cmdline: str) -> int:
+        if "@openai/codex/vendor" in cmdline and "codex" in cmdline:
+            return 0
+        if " node " in f" {cmdline} " and "/bin/codex" in cmdline:
+            return 1
+        if " codex" in f" {cmdline} " or cmdline.rstrip().endswith("/codex"):
+            return 2
+        return 9
+
+    candidates.sort(key=lambda t: (score(t[2]), t[1]))
+    return candidates[0][0]
+
+
+class WezTermController:
+    def __init__(self, tty_path: str, mode: str):
+        self.tty_path = tty_path
+        self.mode = mode
+        self.pane_id: Optional[str] = None
+        self.window_id: Optional[str] = None
+        self._last_list_ms: int = 0
+        self._last_list: List[Dict] = []
+
+    def _wezterm_ok(self) -> bool:
+        return shutil.which("wezterm") is not None
+
+    def _list(self, now_ms: int) -> List[Dict]:
+        if self._last_list_ms and (now_ms - self._last_list_ms) < 500:
+            return self._last_list
+        try:
+            out = subprocess.run(
+                ["wezterm", "cli", "list", "--format", "json"],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            ).stdout
+            items = json.loads(out) if out else []
+            self._last_list = items if isinstance(items, list) else []
+        except Exception:
+            self._last_list = []
+        self._last_list_ms = now_ms
+        return self._last_list
+
+    def resolve(self, now_ms: int) -> None:
+        if not self._wezterm_ok():
+            return
+        for it in self._list(now_ms):
+            if it.get("tty_name") == self.tty_path:
+                pane = it.get("pane_id")
+                win = it.get("window_id")
+                if pane is not None:
+                    self.pane_id = str(pane)
+                if win is not None:
+                    self.window_id = str(win)
+                return
+
+    def pane_is_active(self, now_ms: int) -> bool:
+        if not self.pane_id:
+            return False
+        for it in self._list(now_ms):
+            if str(it.get("pane_id")) == str(self.pane_id):
+                return bool(it.get("is_active"))
+        return False
+
+    def set_title(self, title: str, now_ms: int) -> bool:
+        if self.mode not in ("tab", "window", "window-active"):
+            return False
+        if not self._wezterm_ok():
+            return False
+        if not self.pane_id:
+            self.resolve(now_ms)
+        if not self.pane_id:
+            return False
+
+        if self.mode == "tab":
+            try:
+                r = subprocess.run(
+                    ["wezterm", "cli", "set-tab-title", "--pane-id", str(self.pane_id), title],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+                return r.returncode == 0
+            except Exception:
+                return False
+
+        if self.mode == "window-active" and not self.pane_is_active(now_ms):
+            return True  # no-op, but "handled"
+
+        args = ["wezterm", "cli", "set-window-title"]
+        if self.window_id:
+            args += ["--window-id", str(self.window_id)]
+        else:
+            args += ["--pane-id", str(self.pane_id)]
+        args.append(title)
+        try:
+            r = subprocess.run(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+            return r.returncode == 0
+        except Exception:
+            return False
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+def _run_worker(tty_path: str, start_cwd: Optional[str]) -> int:
+    cache_dir = _cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    pidfile = _pidfile_for_tty(tty_path)
+
+    # Best-effort: stop an existing monitor for this TTY.
+    try:
+        if pidfile.exists():
+            old = pidfile.read_text().strip()
+            if old.isdigit():
+                oldpid = int(old)
+                if _is_alive(oldpid) and "codex-status-bg" in _get_cmdline(oldpid):
+                    _kill_pid(oldpid)
+    except Exception:
+        pass
+
+    _unlink(pidfile)
+    atexit.register(lambda: _unlink(pidfile))
+
+    tty_name = tty_path.replace("/dev/", "")
+    wait_s = int(os.environ.get("CODEX_STATUS_WAIT_S", "10"))
+    deadline = time.time() + max(1, wait_s)
+    codex_pid: Optional[int] = None
+    while time.time() < deadline:
+        codex_pid = _find_codex_pid_on_tty(tty_name)
+        if codex_pid:
+            break
+        time.sleep(0.2)
+
+    if not codex_pid:
+        return 1
+
+    try:
+        pidfile.write_text(str(os.getpid()))
+    except Exception:
+        pass
+
+    mode = os.environ.get("CODEX_STATUS_WEZTERM_MODE", "auto").strip().lower()
+    if mode == "auto":
+        mode = "window-active" if shutil.which("wezterm") else "off"
+    wez = WezTermController(tty_path=tty_path, mode=mode)
+    interval_s = float(os.environ.get("CODEX_STATUS_INTERVAL_S", "2"))
+
+    try:
+        tty_out = open(tty_path, "w", buffering=1)
+    except Exception:
+        tty_out = None
+
+    monitor = CodexMonitor(pid=codex_pid, start_cwd=start_cwd)
+    last_title = ""
+    try:
+        while True:
+            status = monitor.sample()
+            title = render_title(status)
+            now_ms = _now_ms()
+            if title != last_title:
+                handled = False
+                if mode != "off":
+                    handled = wez.set_title(title, now_ms)
+                if not handled and tty_out:
+                    try:
+                        set_terminal_title(title, out=tty_out)
+                    except Exception:
+                        pass
+                last_title = title
+
+            if status.state == State.EXITED:
+                break
+            time.sleep(interval_s)
+    finally:
+        try:
+            if tty_out:
+                tty_out.close()
+        except Exception:
+            pass
+        _unlink(pidfile)
+
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tty", help="TTY name like pts/3 or /dev/ttys001")
+    parser.add_argument("start_cwd", nargs="?", default=None)
+    parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+
+    tty_path = _tty_path(args.tty)
+
+    if not args.foreground:
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--foreground", tty_path]
+        if args.start_cwd:
+            cmd.append(args.start_cwd)
+        try:
+            subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return 0
+        except Exception:
+            return _run_worker(tty_path, args.start_cwd)
+
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    return _run_worker(tty_path, args.start_cwd)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
