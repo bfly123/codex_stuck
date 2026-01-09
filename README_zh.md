@@ -1,6 +1,6 @@
-# codex-status
+# codex_stuck
 
-在终端标题栏实时显示 Codex CLI 状态。
+检测codex是在运行还是stuck了。 你是不是经常遇到codex长时间执行毫无响应，想杀掉但又害怕它还在默默执行？
 
 [English](README.md) | **中文**
 
@@ -8,7 +8,7 @@
 
 ## 核心思想
 
-**问题**: Codex CLI 无法直观显示是否在工作还是等待输入。
+轻量级codex终端状态显示小插件。 通过监测session文件状态，流量变化和沉默时间确定codex是否卡死。 打造这款插件除了便于检测codex状态外，也是为了cca(https://github.com/bfly123/claude_code_autoflow)和ccb(https://github.com/bfly123/claude_code_bridge) 全自动运行，制作的一个监测器。
 
 **方案**:
 1. 注入完成标记 (`CODEX_DONE`) 到 Codex 提示词
@@ -51,7 +51,6 @@
 ```bash
 codex
 ```
-
 终端标题将实时显示状态。
 
 ## 卸载

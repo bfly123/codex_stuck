@@ -1,14 +1,14 @@
-# codex-status
+# codex_stuck
 
-Real-time status monitor for Codex CLI in your terminal title.
+Detect whether Codex is running or stuck. Have you ever experienced Codex running for a long time with no response, wanting to kill it but afraid it's still working silently?
 
-**English** | [中文](README_zh.md)
+[English](README.md) | [中文](README_zh.md)
 
 ![demo](images/demo.gif)
 
 ## Core Idea
 
-**Problem**: Codex CLI has no built-in way to show if it's working or waiting for input.
+A lightweight terminal status display plugin for Codex. It determines whether Codex is stuck by monitoring session file status, traffic changes, and silence duration. This plugin was created not only for easily detecting Codex status, but also as a monitor for fully automated operation of [cca](https://github.com/bfly123/claude_code_autoflow) and [ccb](https://github.com/bfly123/claude_code_bridge).
 
 **Solution**:
 1. Inject completion markers (`CODEX_DONE`) into Codex prompts
