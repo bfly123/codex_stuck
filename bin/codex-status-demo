@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Demo mode: cycle through all status states for video recording."""
+
+import sys
+import time
+import os
+
+ICON_STYLE = os.getenv("CODEX_STATUS_ICON_STYLE", "shape")
+
+STATES = [
+    ("running", "Run", "Processing request..."),
+    ("thinking", "Think", "Waiting for model..."),
+    ("idle", "Idle", "Long pause..."),
+    ("stuck", "Stuck", "Model not responding..."),
+    ("free", "Free", "Ready for input"),
+    ("exited", "Exit", "Process ended"),
+]
+
+ICONS_SHAPE = {
+    "running": "▶",
+    "thinking": "▷",
+    "idle": "◇",
+    "free": "□",
+    "stuck": "■",
+    "exited": "×",
+}
+
+ICONS_EMOJI = {
+    "running": "🟢",
+    "thinking": "🟡",
+    "idle": "🟠",
+    "free": "🔵",
+    "stuck": "🔴",
+    "exited": "⚫",
+}
+
+def get_icon(state: str) -> str:
+    if ICON_STYLE == "emoji":
+        return ICONS_EMOJI.get(state, "?")
+    return ICONS_SHAPE.get(state, "?")
+
+def set_title(title: str):
+    sys.stdout.write(f"\033]0;{title}\007")
+    sys.stdout.flush()
+
+def main():
+    interval = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
+    loops = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+
+    print(f"Demo mode: cycling states every {interval}s")
+    print(f"Loops: {'infinite' if loops == 0 else loops}")
+    print("Press Ctrl+C to stop\n")
+
+    count = 0
+    try:
+        while loops == 0 or count < loops:
+            for state, name, desc in STATES:
+                icon = get_icon(state)
+                title = f"{icon} Codex: {name}"
+                set_title(title)
+                print(f"  {icon} {name:8} - {desc}")
+                time.sleep(interval)
+            count += 1
+            if loops == 0 or count < loops:
+                print("  --- loop ---")
+    except KeyboardInterrupt:
+        print("\n\nDemo stopped.")
+    finally:
+        set_title("Codex")
+
+if __name__ == "__main__":
+    main()

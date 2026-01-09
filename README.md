@@ -4,6 +4,8 @@ Real-time status monitor for Codex CLI in your terminal title.
 
 **English** | [中文](README_zh.md)
 
+![demo](images/demo.gif)
+
 ## Core Idea
 
 **Problem**: Codex CLI has no built-in way to show if it's working or waiting for input.

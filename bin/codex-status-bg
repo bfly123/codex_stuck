@@ -284,7 +284,75 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def _run_demo_loop(tty_path: str) -> int:
+    """Demo mode: cycle through all states for video recording."""
+    from monitor import CodexStatus
+
+    demo_states = [
+        State.RUNNING,
+        State.THINKING,
+        State.IDLE,
+        State.STUCK,
+        State.FREE,
+        State.EXITED,
+    ]
+
+    mode = os.environ.get("CODEX_STATUS_WEZTERM_MODE", "auto").strip().lower()
+    if mode == "auto":
+        mode = "window-active" if shutil.which("wezterm") else "off"
+    wez = WezTermController(tty_path=tty_path, mode=mode)
+    interval_s = float(os.environ.get("CODEX_STATUS_DEMO_INTERVAL", "3"))
+
+    try:
+        tty_out = open(tty_path, "w", buffering=1)
+    except Exception:
+        tty_out = None
+
+    idx = 0
+    last_title = ""
+    try:
+        while True:
+            state = demo_states[idx % len(demo_states)]
+
+            status = CodexStatus()
+            status.state = state
+            status.pid = 12345
+            status.elapsed_s = idx * interval_s
+            status.silence_s = 0 if state == State.RUNNING else (idx + 1) * 5
+            status.task_s = status.silence_s if state not in (State.FREE, State.EXITED) else 0
+
+            title = render_title(status)
+            now_ms = _now_ms()
+
+            if title != last_title:
+                handled = False
+                if mode != "off":
+                    handled = wez.set_title(title, now_ms)
+                if not handled and tty_out:
+                    try:
+                        set_terminal_title(title, out=tty_out)
+                    except Exception:
+                        pass
+                last_title = title
+
+            idx += 1
+            time.sleep(interval_s)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if tty_out:
+            try:
+                tty_out.close()
+            except Exception:
+                pass
+    return 0
+
+
 def _run_worker(tty_path: str, start_cwd: Optional[str]) -> int:
+    # Demo mode check
+    if os.environ.get("CODEX_STATUS_DEMO", "").strip() == "1":
+        return _run_demo_loop(tty_path)
+
     cache_dir = _cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     pidfile = _pidfile_for_tty(tty_path)

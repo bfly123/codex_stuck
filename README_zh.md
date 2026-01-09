@@ -4,6 +4,8 @@
 
 [English](README.md) | **中文**
 
+![demo](images/demo.gif)
+
 ## 核心思想
 
 **问题**: Codex CLI 无法直观显示是否在工作还是等待输入。
